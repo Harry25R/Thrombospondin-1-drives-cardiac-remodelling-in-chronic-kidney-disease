@@ -1,0 +1,354 @@
+---
+title: "GSE160145 - THBS1 in CKD"
+author: "Harry Robertson"
+date: "04/07/2021"
+output: html_document
+---
+
+```{r}
+library(DOSE)
+library(enrichplot)
+# library(clusterProfiler)
+library(GEOquery)
+library(biomaRt)
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+library(directPA)
+library(PhosR)
+library(AnnotationDbi)
+library(rPanglaoDB)
+library(SeuratObject)
+library(Seurat)
+library(Nebulosa)
+```
+
+# GSE160145
+## This is unpublished data so is very rough and i had to make a lot of assumptions / clean the data a lot / remove datapoints (oh well)
+
+```{r}
+sfiles <- getGEOSuppFiles("GSE160145")
+fnames <- rownames(sfiles)
+Assay <- read.delim(gzfile(fnames[1]))
+rownames(Assay) <- Assay[,1]
+Assay <- Assay[,-1]
+Assay <- Assay[,-1]
+```
+
+```{r}
+Data <- getGEO("GSE160145")
+PhenoData <- pData(Data[[1]])
+pData(Data[[1]])
+Compare <- data.frame(PhenoData$source_name_ch1, PhenoData$title, PhenoData$characteristics_ch1.1, PhenoData$description)
+int <- intersect(PhenoData$title, colnames(Assay))
+PhenoData <- PhenoData[which(PhenoData$title %in% int),]
+Assay <- Assay[,int]
+```
+
+```{r}
+PhenoData.DF <- data.frame(Condition = PhenoData$`patient diagnosis:ch1`, 
+                           Organism = PhenoData$organism_ch1, 
+                           row.names = PhenoData$title)
+PhenoData.DF <- PhenoData.DF[which(PhenoData.DF$Condition != "n/a"),]
+Assay <- Assay[,which(PhenoData.DF$Condition != "n/a")]
+Assay <- Assay +1
+dds_THBS <- DESeqDataSetFromMatrix(countData =  as.matrix(Assay),
+                                     colData =  PhenoData.DF,
+                                     design = ~ Condition)
+```
+
+```{r}
+dds_THBS <- estimateSizeFactors(dds_THBS)
+normalized_counts <- counts(dds_THBS, normalized = TRUE)
+vsd <- vst(dds_THBS, blind = TRUE)
+vsd_mat <- assay(vsd)
+vsd_cor <- cor(vsd_mat) 
+pheatmap(vsd_cor, annotation = dplyr::select(PhenoData.DF, Condition))
+```
+
+```{r}
+dds_THBS <- DESeq(dds_THBS)
+plotDispEsts(dds_THBS)
+```
+
+```{r}
+RES <- results(dds_THBS, 
+                contrast = c("Condition", "CKD", "healthy"), 
+                alpha = 0.05)
+summary(RES)
+```
+
+```{r}
+THBS_res_all <- data.frame(RES)
+THBS_res_sig <- subset(THBS_res_all, padj < 0.05)
+THBS_res_sig
+THBS_res_sig <- THBS_res_sig %>%
+  arrange(padj) %>%
+  rownames_to_column("gene")
+write_xlsx(THBS_res_sig, "THBS1 Results.xlsx")
+which(rownames(THBS_res_sig) == "THBS1")
+plotMA(RES)
+THBS_res_sig
+```
+
+```{r}
+# CD47 in the volcano plot
+RES_all <- data.frame(RES) %>% 
+  mutate(Significant = padj < 0.05)
+ggplot(RES_all) + 
+        geom_point(aes(x = log2FoldChange, y = -log10(padj), color = Significant)) + 
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") + 
+        theme(legend.position = "none", 
+              plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25))) + theme_classic() + geom_point(data = filter(RES_all, rownames(RES_all) == "THBS1"), aes(x = log2FoldChange, y = -log10(padj), colour = "ZZ"), size = 4) + scale_color_brewer(palette="YlGnBu")
+```
+
+#### Heatmap
+
+```{r}
+normalized_counts <- as.data.frame(normalized_counts)
+sig_norm_counts_THBS <- normalized_counts[rownames(THBS_res_sig),]
+heat_colors <- brewer.pal(n = 6, name = "Spectral")
+pheatmap(sig_norm_counts_THBS[1:20,-c(1:8)], 
+         color = heat_colors, 
+         cluster_rows = TRUE, 
+         show_rownames = TRUE,
+         annotation = dplyr::select(PhenoData.DF[-c(1:8),], Condition), 
+         scale = "row")
+```
+
+```{r}
+THBS1_Counts <- as.data.frame(normalized_counts)
+THBS1_Counts <- THBS1_Counts[,-c(1:8)]
+colnames(THBS1_Counts) <- c("Healthy", "Healthy", "Healthy", "Healthy", "Healthy",
+                  "CKD", "CKD", "CKD", "CKD", "CKD", "CKD", "CKD", "CKD",
+                  "CKD", "CKD", "CKD", "CKD")
+THBS1_Counts <- THBS1_Counts["THBS1",] %>%
+  pivot_longer(cols = everything())
+ggplot(THBS1_Counts, aes(x = factor(name), y = log(value), 
+                         fill = name)) + 
+  geom_boxplot() + theme_classic() + ylab("Log of Normalised Expression") + 
+  xlab("Patient Condition") +  stat_compare_means(aes(label = "p.format"), 
+                        label.x = 1.5, label.y = 10)
+```
+
+```{r}
+ggplot(THBS1_Counts, aes(x = factor(name), y = value, 
+                         fill = name)) + 
+  geom_boxplot() + theme_classic() + ylab("Normalised Expression Value") + 
+  xlab("Patient Condition") +  stat_compare_means(aes(label = "p.format"), 
+                        label.x = 1.5, label.y = 5000)
+```
+
+```{r}
+CKDvHealthy_RES <- RES_all
+RES <- results(dds_THBS, 
+                contrast = c("Condition", "hypertension", "healthy"), 
+                alpha = 0.05)
+THBS_res_all <- data.frame(RES)
+THBS_res_sig <- subset(THBS_res_all, padj < 0.05)
+THBS_res_sig <- THBS_res_sig %>%
+  arrange(padj)
+THBS_res_sig
+plotMA(RES)
+RES_all <- data.frame(RES) %>% 
+  mutate(threshold = padj < 0.05)
+ggplot(RES_all) + 
+        geom_point(aes(x = log2FoldChange, y = -log10(padj), color = threshold)) + 
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") + 
+        theme(legend.position = "none", 
+              plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25))) + theme_classic()
+sig_norm_counts_THBS <- normalized_counts[rownames(THBS_res_sig), ]
+heat_colors <- brewer.pal(n = 6, name = "Spectral")
+pheatmap(sig_norm_counts_THBS, 
+         color = heat_colors, 
+         cluster_rows = TRUE, 
+         show_rownames = FALSE,
+         annotation = dplyr::select(PhenoData.DF, Condition), 
+         scale = "row")
+HypertensionVHelathy_RES <- RES_all
+plot <- plot(HypertensionVHelathy_RES$stat, CKDvHealthy_RES$stat)
+int <- intersect(rownames(HypertensionVHelathy_RES), rownames(CKDvHealthy_RES))
+CKDvHypo.Stats <- cbind(HypertensionVHelathy_RES[int,]$stat,CKDvHealthy_RES[int,]$stat)
+rownames(CKDvHypo.Stats) <- int
+CKDvHypo.Stats <- as.data.frame(CKDvHypo.Stats)
+colnames(CKDvHypo.Stats) <- c("Hypertension", "CKD")
+ggplot(CKDvHypo.Stats, aes(x = CKD, y = Hypertension)) + 
+  geom_point(alpha = 0.05) + 
+  theme_classic() + 
+  geom_point(data=CKDvHypo.Stats[rownames(CKDvHypo.Stats) == "THBS1",], 
+             aes(x=CKD,y=Hypertension), 
+             color='red',
+             size=5)
+CKDvHypo.Stats["THBS1",]
+CKDvHealthy_RES
+```
+```{r}
+ggplot(CKDvHypo.Stats, aes(x = CKD, y = Hypertension)) + 
+  geom_point(alpha = 0.05) + 
+  theme_classic() + 
+  geom_point(data=CKDvHypo.Stats[rownames(CKDvHypo.Stats) == "THBS1",], 
+             aes(x=CKD,y=Hypertension), 
+             color='red',
+             size=5) + 
+  geom_point(data=CKDvHypo.Stats[rownames(CKDvHypo.Stats) == "CD47",], 
+             aes(x=CKD,y=Hypertension), 
+             color='blue',
+             size=5) + xlab("Wald Statistic of genes between CKD Patients and Control") + ylab("Wald Statistic of genes between \nHypertensive Patients and Control")
+````
+
+```{r}
+Z.Scores.All <- apply(CKDvHypo.Stats, 2, function(x){qnorm(rank(x)/(nrow(CKDvHypo.Stats)+1))})
+data(Pathways)
+gene.pvalues <- apply(Z.Scores.All, 1, geneStats)
+gene.zscores <- qnorm(gene.pvalues, lower.tail = FALSE)
+pvalue2sided=2*pnorm(-abs(gene.zscores))
+Genes.THBS1 <- names(pvalue2sided %>%
+  subset(pvalue2sided < 0.01))
+Genes.THBS1
+JJ <- CKDvHealthy_RES
+EntrezID <- mapIds(Homo.sapiens, keys = Genes.THBS1, column = c("ENTREZID"), 
+                   keytype = "SYMBOL", multiVals = "first")
+barplot(enrichKEGG(EntrezID)) + xlab("Genes Within Pathway")
+```
+
+```{r}
+THBS_sig <- subset(CKDvHealthy_RES, padj < 0.01, log2FoldChange < 0)
+THBS_sig
+THBS_sig <- THBS_sig %>%
+  mutate(Symbol = rownames(THBS_sig))
+which(rownames(THBS_sig) == "THBS1")
+gene.zscores <- qnorm(CKDvHealthy_RES$padj, lower.tail = FALSE)
+names(gene.zscores) <- rownames(CKDvHealthy_RES)
+gene.pvalues <- RES_all$padj
+names(gene.pvalues) <- rownames(RES_all)
+GOpvalWilcox = unlist(lapply(Pathways.KEGG,function(x){
+  pathway = names(gene.pvalues)%in%x
+  wilcox.test(gene.pvalues[pathway],gene.pvalues[!pathway],alternative = 'less')$p.value
+}))
+GOpvalWilcox <- as.data.frame(GOpvalWilcox[GOpvalWilcox < 0.01])
+P.Wilcox <- data.frame(P.Value = GOpvalWilcox$`GOpvalWilcox[GOpvalWilcox < 0.01]`, 
+                       Pathway = rownames(GOpvalWilcox))
+P.Wilcox <- P.Wilcox %>%
+  mutate(Score = -log(P.Value))
+ggplot(P.Wilcox, aes(x = Score, y = factor(Pathway))) + geom_bar(stat = "identity") + theme_classic() + ylab("Pathway") + xlab("-log10 P-Value")
+```
+
+```{r, fig.height=}
+# gene.zscores <- qnorm(RES_all$padj, lower.tail = FALSE)
+# names(gene.zscores) <- rownames(RES_all)
+gene.zscores
+EntrezID <- mapIds(Homo.sapiens, keys = names(gene.zscores), column = c("ENTREZID"), 
+                   keytype = "SYMBOL", multiVals = "first")
+idx <- which(!duplicated(EntrezID) & !is.na(EntrezID))
+gene.zscores <- gene.zscores[idx]
+geneList <- gene.zscores
+names(geneList) <- EntrezID[idx]
+library(org.Hs.eg.db)
+organism = org.Hs.eg.db
+geneList = sort(geneList, decreasing = TRUE)
+gse <- gseGO(geneList=geneList, 
+             ont ="ALL", 
+             keyType = "SYMBOL",
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             eps = 0,
+             pvalueCutoff = 0.001, 
+             verbose = TRUE, 
+             OrgDb = organism)
+dotplot(gse, showCategory=10, split=".sign", x = "Count", color = NULL) + facet_grid(.~.sign)
+K <- as.data.frame(gse)
+K <- K %>%
+  dplyr::mutate(log = -log(p.adjust)) %>%
+  arrange(K, NES)
+colnames(K) <- c("ONTOLOGY", "ID", "Description", "Count", "enrichmentScore", "NES", "pvalue", "p.adjust", "qvalues", "rank", "leading_edge", "core_enrichment", "log")
+K$Pathway.Direction <- cut(K$NES, c(-Inf,0,Inf), c("Supressed Pathways", "Upregulated Pathways"))
+Harrys.Dotplot(K[c(5,6,7,11,12,41,42,56,62,119,127,136,142,161,167,192,211,
+                   259,267,339,360,433,505,511,536,543,574,585,586,798),], showCategory=10, x = "log", color = "Count") + facet_grid(. ~ Pathway.Direction) 
+```
+
+```{r}
+adjp.CKD <- data.frame(CKDvHealthy_RES$padj, row.names = rownames(CKDvHealthy_RES))
+gene.zscores <- qnorm(adjp.CKD$CKDvHealthy_RES.padj, lower.tail = FALSE)
+geneList <- gene.zscores
+library(org.Hs.eg.db)
+organism = org.Hs.eg.db
+geneList = sort(geneList, decreasing = TRUE)
+gse <- gseGO(geneList=geneList, 
+             ont ="ALL", 
+             keyType = "SYMBOL",
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             eps = 0,
+             pvalueCutoff = 0.001, 
+             verbose = TRUE, 
+             OrgDb = organism)
+dotplot(gse, showCategory=10, split=".sign", x = "Count", color = NULL) + facet_grid(.~.sign)
+
+K <- as.data.frame(gse)
+K <- K %>%
+  dplyr::mutate(log = -log(p.adjust)) %>%
+  arrange(K, NES)
+colnames(K) <- c("ONTOLOGY", "ID", "Description", "Count", "enrichmentScore", "NES", "pvalue", "p.adjust", "qvalues", "rank", "leading_edge", "core_enrichment", "log")
+K$Pathway.Direction <- cut(K$NES, c(-Inf,0,Inf), c("Supressed Pathways", "Upregulated Pathways"))
+Harrys.Dotplot(K, showCategory=10, x = "log", color = "Count") + facet_grid(. ~ Pathway.Direction) 
+```
+
+```{r}
+KK <- rbind(K[grep("cardaic", K$Description),],
+            K[grep("vessel", K$Description),],
+            K[grep("AV node", K$Description),],
+            K[grep("calcium", K$Description),],
+            K[grep("angiogenesis", K$Description),],
+            K[grep("hypoxia", K$Description),])
+Harrys.Dotplot(KK, showCategory=10, x = "log", color = "Count") + facet_grid(. ~ Pathway.Direction)
+```
+
+```{r}
+Harrys.Dotplot(K[which(abs(K$NES) > 2.5),], showCategory=10, x = "log", color = "Count") + 
+  facet_grid(. ~ Pathway.Direction) 
+```
+
+#lets do some barplot
+```{r}
+gene.zscores <- qnorm(THBS_sig$padj, lower.tail = FALSE)
+names(gene.zscores) <- rownames(THBS_sig)
+EntrezID <- mapIds(Homo.sapiens, keys = names(gene.zscores), column = c("ENTREZID"), keytype = "SYMBOL", multiVals = "first")
+idx <- which(!duplicated(EntrezID) & !is.na(EntrezID))
+gene.zscores <- gene.zscores[idx]
+names(gene.zscores) <- EntrezID[idx]
+geneList <- gene.zscores
+gene <- names(geneList)
+barplot(enrichKEGG(gene)) + xlab("Genes Within Each Pathway")
+```
+
+```{r}
+dotplot(enrichKEGG(gene))
+```
+
+```{r}
+barplot(enrichDO(gene)) + xlab("Genes Within Each Pathway")
+```
+
+
+```{r}
+set.seed(1234)
+LF.Heart <- getSamples(sra = "SRA637291", merge = TRUE)
+HeartCounts <- NormalizeData(LF.Heart, verbose = FALSE)
+HeartCounts <- ScaleData(HeartCounts, verbose = FALSE)
+HeartCounts <- FindVariableFeatures(HeartCounts, verbose = FALSE)
+HeartCounts <- RunPCA(HeartCounts, verbose = FALSE)
+HeartCounts <- RunHarmony(HeartCounts, 
+                          group.by.vars = 'orig.ident',
+                          max.iter.harmony = 50,
+                          verbose = FALSE)
+HeartCounts <- RunUMAP(HeartCounts, reduction = 'harmony', dims = 1:10)
+UMAPPlot(HeartCounts, label = TRUE, repel = TRUE, group.by = "CellTypes")
+```
+
+```{r}
+plot_density(HeartCounts, features = "THBS1")
+```
